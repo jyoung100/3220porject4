@@ -56,13 +56,13 @@ typedef struct {
 } FileInfo;
 
 // Global variables
-static uint8_t *disk_image = NULL;
-static size_t image_size = 0;
-static BootSector *boot_sector = NULL;
-static uint8_t *fat_table = NULL;
-static FileInfo *files = NULL;
-static int file_count = 0;
-static int file_capacity = 0;
+uint8_t *disk_image = NULL;
+size_t image_size = 0;
+BootSector *boot_sector = NULL;
+uint8_t *fat_table = NULL;
+FileInfo *files = NULL;
+int file_count = 0;
+int file_capacity = 0;
 
 // Function prototypes
 int read_disk_image(const char *filename);
