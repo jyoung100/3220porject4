@@ -15,7 +15,6 @@
 #define SECTORS_PER_FAT 9           
 #define ROOT_DIR_ENTRIES 224        
 #define ROOT_DIR_SECTORS 14         
-#define SECTORS_PER_CLUSTER 1 
 #define BYTES_PER_CLUSTER 512
 
 // FAT12 Directory Entry 
@@ -36,7 +35,7 @@ typedef struct {
 // File information 
 typedef struct {
     char path[512];
-    uint32_t size;
+    int size;
     uint16_t starting_cluster;
     int is_deleted;
     char extension[4];
@@ -48,23 +47,15 @@ uint8_t *fat_table = NULL;
 FileInfo *files;
 int file_count = 0;
 int file_capacity = 0;
-/*
-int read_disk_image(char *filename);
-void read_fat_table();
-uint16_t get_fat_entry(uint16_t cluster);
-void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path);
-void recover_and_write_file(FileInfo *file, FILE *fp);
-void print_files();
-void write_recovered_files(char *output_dir);
-*/
+
 // Read disk image into memory
 int read_disk_image(char *filename) {
     int fd = open(filename, O_RDONLY);
     
-    struct stat st;
-    fstat(fd, &st);
+    struct stat info;
+    fstat(fd, &info);
     
-    image_size = st.st_size;
+    image_size = info.st_size;
     disk_image = malloc(image_size);
     
     
@@ -76,9 +67,9 @@ int read_disk_image(char *filename) {
 
 
 // Read FAT table
-void read_fat_table(void) {
-    uint32_t fat_offset = RESERVED_SECTORS * BYTES_PER_SECTOR;
-    uint32_t fat_size = SECTORS_PER_FAT * BYTES_PER_SECTOR;
+void read_fat_table() {
+    int fat_offset = RESERVED_SECTORS * BYTES_PER_SECTOR;
+    int fat_size = SECTORS_PER_FAT * BYTES_PER_SECTOR;
     
     fat_table = malloc(fat_size);
     
@@ -130,6 +121,8 @@ void add_file(char *path, uint32_t size, uint16_t cluster, int is_deleted, char 
     file->is_deleted = is_deleted;
     strncpy(file->extension, ext, sizeof(file->extension) - 1);
     file->extension[sizeof(file->extension) - 1] = '\0';
+    //printf("file->path: %s\n", file->path);
+    //printf("file->extension: %s\n", file->extension);
     file_count++;
 }
 
@@ -152,13 +145,8 @@ void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path) {
             break;
         }
         
-        // Skip volume label entries
-        if (entry->attributes == 0x08) {
-            continue;
-        }
-        
-        // Skip "." ,  ".." entries
-        if (first_char == 0x2E) {
+        // Skip volume labels and "." / ".."
+        if (entry->attributes == 0x08 || first_char == 0x2E) {
             continue;
         }
         
@@ -185,15 +173,24 @@ void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path) {
         while (name_len > 0 && filename[name_len - 1] == ' ') {
             name_len--;
         }
+
         filename[name_len] = '\0';
-        
-        // null terminate filename
         filename[sizeof(filename) - 1] = '\0';
         
         // Build extension
         char ext[4];
         memcpy(ext, entry->extension, 3);
         ext[3] = '\0';
+        
+        // Check if extension has any non-space, non-null characters
+        int has_extension = 0;
+        for (int j = 0; j < 3; j++) {
+            unsigned char byte = (unsigned char)entry->extension[j];
+            if (byte != ' ' && byte != 0x00) {
+                has_extension = 1;
+                break;
+            }
+        }
         
         // Remove trailing spaces from extension
         int ext_len = 3;
@@ -210,15 +207,17 @@ void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path) {
             snprintf(full_path, sizeof(full_path), "%s/%s", path, filename);
         }
         
-        // Add extension
-        if (ext_len > 0) {
+        // Add extension if it exists
+        if (has_extension && ext_len > 0) {
             strcat(full_path, ".");
             strncat(full_path, ext, ext_len);
         }
+
+        //printf("full path: %s", full_path);
         
         // Check if it's a directory
         if (entry->attributes & 0x10) {
-            // It's a directory
+            //double check
             if (entry->starting_cluster >= 2) {
                 // get directory data offset
                 uint32_t data_start = (RESERVED_SECTORS + NUM_FATS * SECTORS_PER_FAT +
@@ -226,8 +225,6 @@ void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path) {
                                       BYTES_PER_SECTOR;
                 
                 // Parse subdirectory, recursively find files or subdirectories within directories
-                // For deleted directories, just parse first cluster
-                // For normal directories, follow FAT chain
                 if (is_deleted || entry->file_size == 0) {
                     // Deleted directory or zero-size,  parse first cluster
                     uint32_t dir_cluster_offset = data_start + (entry->starting_cluster - 2) * BYTES_PER_CLUSTER;
@@ -239,21 +236,14 @@ void parse_directory(uint32_t dir_offset, uint32_t dir_size, char *path) {
                     uint16_t current_cluster = entry->starting_cluster;
                     int total_size = 0;
                     int max_size = 0;
-                    if(entry->file_size > 0) {
-                        max_size = entry->file_size;
-                    }
-                    else{
-                        max_size = BYTES_PER_CLUSTER;
-                    }
+                    max_size = entry->file_size;
                     
-                    //loop through clusters until we hit end of file or max size
+                    //loop through clusters until hit end of file or max size
                     while (current_cluster < 0xFF0 && total_size < max_size) {
                         uint32_t dir_cluster_offset = data_start +  (current_cluster - 2) * BYTES_PER_CLUSTER;
                         uint32_t cluster_size = BYTES_PER_CLUSTER;
                         uint32_t size_to_parse = max_size - total_size;
-                        if (size_to_parse > cluster_size) {
-                            size_to_parse = cluster_size;
-                        }
+
                         //recurse
                         parse_directory(dir_cluster_offset, size_to_parse, full_path);
                         total_size += cluster_size;
@@ -288,7 +278,7 @@ void recover_and_write_file(FileInfo *file, FILE *fp) {
         // For deleted files, read clusters sequentially until hit a used cluster or reach file size
         uint32_t clusters_needed = (file->size + BYTES_PER_CLUSTER - 1) / BYTES_PER_CLUSTER;
         
-        for (uint32_t i = 0; i < clusters_needed && bytes_recovered < file->size; i++) {
+        for (int i = 0; i < clusters_needed && bytes_recovered < file->size; i++) {
             uint16_t fat_entry = get_fat_entry(current_cluster);
             
             // If FAT entry is not 0x000, stop
@@ -302,11 +292,11 @@ void recover_and_write_file(FileInfo *file, FILE *fp) {
             if (bytes_to_read > BYTES_PER_CLUSTER) {
                 bytes_to_read = BYTES_PER_CLUSTER;
             }
-            
+            //write to file
             fwrite(disk_image + cluster_offset, 1, bytes_to_read, fp);
             bytes_recovered += bytes_to_read;
             
-            // Move to next cluster
+            // Move to next
             current_cluster++;
             
             // Check if end cluster
@@ -338,7 +328,7 @@ void recover_and_write_file(FileInfo *file, FILE *fp) {
 }
 
 // Print all files
-void print_files(void) {
+void print_files() {
     for (int i = 0; i < file_count; i++) {
         char *status;
         if (files[i].is_deleted) {
@@ -353,8 +343,8 @@ void print_files(void) {
 
 // Write recovered files to output directory
 void write_recovered_files(char *output_dir) {
+
     int file_index = 0;
-    
     for (int i = 0; i < file_count; i++) {
         char output_path[512];
         const char *dot;
@@ -390,23 +380,17 @@ int main(int argc, char *argv[]) {
     char *image_filename = argv[1];
     char *output_dir = argv[2];
     
-    // Read disk image
     read_disk_image(image_filename);
     
-    // Read FAT table
     read_fat_table();
     
-    // Calculate root directory offset
     uint32_t root_dir_offset = (RESERVED_SECTORS + NUM_FATS * SECTORS_PER_FAT) * BYTES_PER_SECTOR;
     uint32_t root_dir_size = ROOT_DIR_ENTRIES * 32;
     
-    // Parse root directory
     parse_directory(root_dir_offset, root_dir_size, "/");
     
-    // Print files
     print_files();
-    
-    // Write recovered files
+
     write_recovered_files(output_dir);
     
     return 0;
